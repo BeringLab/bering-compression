@@ -1,43 +1,12 @@
 use serde::{de::DeserializeOwned, Serialize};
-use std::io;
 
+pub mod compressors;
 pub mod error;
+
+pub use compressors::{
+    CompressionAlgorithm, CompressorFactory, DefaultCompressor, SnappyCompressor, TCompressor,
+};
 pub use error::CompressorError;
-
-/// A trait for types that can compress and decompress data.
-pub trait TCompressor {
-    fn compress(value: &[u8]) -> Result<Vec<u8>, CompressorError>;
-    fn decompress(compressed: &[u8]) -> Result<Vec<u8>, CompressorError>;
-}
-
-/// Snappy compression implementation
-pub struct SnappyCompressor;
-
-impl TCompressor for SnappyCompressor {
-    fn compress(mut value: &[u8]) -> Result<Vec<u8>, CompressorError> {
-        let mut compressed = Vec::new();
-        let mut encoder = snap::write::FrameEncoder::new(&mut compressed);
-
-        io::copy(&mut value, &mut encoder)
-            .map_err(|err| CompressorError::CompressionError(err.to_string()))?;
-
-        drop(encoder);
-        Ok(compressed)
-    }
-
-    fn decompress(compressed: &[u8]) -> Result<Vec<u8>, CompressorError> {
-        let mut reader = snap::read::FrameDecoder::new(compressed);
-        let mut decompressed = Vec::new();
-
-        io::copy(&mut reader, &mut decompressed)
-            .map_err(|err| CompressorError::DecompressionError(err.to_string()))?;
-
-        Ok(decompressed)
-    }
-}
-
-/// Default compressor type
-pub type DefaultCompressor = SnappyCompressor;
 
 /// A trait for types that can be compressed and decompressed
 pub trait TCompressible: Serialize + DeserializeOwned {
@@ -45,23 +14,53 @@ pub trait TCompressible: Serialize + DeserializeOwned {
         let serialized = serde_json::to_vec(self)
             .map_err(|err| CompressorError::SerializationError(err.to_string()))?;
 
-        DefaultCompressor::compress(&serialized)
+        let compressor = SnappyCompressor;
+        compressor.compress(&serialized)
     }
 
     fn decompress(compressed: &[u8]) -> Result<Self, CompressorError> {
-        let decompressed = DefaultCompressor::decompress(compressed)?;
+        let compressor = SnappyCompressor;
+        let decompressed = compressor.decompress(compressed)?;
+
         serde_json::from_slice(&decompressed)
             .map_err(|err| CompressorError::DeserializationError(err.to_string()))
     }
 
-    fn compress_with<C: TCompressor>(&self) -> Result<Vec<u8>, CompressorError> {
+    fn compress_with<C: TCompressor>(&self, compressor: &C) -> Result<Vec<u8>, CompressorError> {
         let serialized = serde_json::to_vec(self)
             .map_err(|err| CompressorError::SerializationError(err.to_string()))?;
-        C::compress(&serialized)
+
+        compressor.compress(&serialized)
     }
 
-    fn decompress_with<C: TCompressor>(compressed: &[u8]) -> Result<Self, CompressorError> {
-        let decompressed = C::decompress(compressed)?;
+    fn decompress_with<C: TCompressor>(
+        compressed: &[u8],
+        compressor: &C,
+    ) -> Result<Self, CompressorError> {
+        let decompressed = compressor.decompress(compressed)?;
+
+        serde_json::from_slice(&decompressed)
+            .map_err(|err| CompressorError::DeserializationError(err.to_string()))
+    }
+
+    fn compress_with_algorithm(
+        &self,
+        algorithm: CompressionAlgorithm,
+    ) -> Result<Vec<u8>, CompressorError> {
+        let compressor = CompressorFactory::get_compressor(algorithm);
+        let serialized = serde_json::to_vec(self)
+            .map_err(|err| CompressorError::SerializationError(err.to_string()))?;
+
+        compressor.compress(&serialized)
+    }
+
+    fn decompress_with_algorithm(
+        compressed: &[u8],
+        algorithm: CompressionAlgorithm,
+    ) -> Result<Self, CompressorError> {
+        let compressor = CompressorFactory::get_compressor(algorithm);
+        let decompressed = compressor.decompress(compressed)?;
+
         serde_json::from_slice(&decompressed)
             .map_err(|err| CompressorError::DeserializationError(err.to_string()))
     }
@@ -100,9 +99,27 @@ mod tests {
             field2: 24,
         };
 
-        let compressed = test_struct.compress_with::<SnappyCompressor>().unwrap();
+        let compressor = SnappyCompressor;
+        let compressed = test_struct.compress_with(&compressor).unwrap();
         let decompressed: TestStruct =
-            TCompressible::decompress_with::<SnappyCompressor>(&compressed).unwrap();
+            TCompressible::decompress_with(&compressed, &compressor).unwrap();
+
+        assert_eq!(test_struct, decompressed);
+    }
+
+    #[test]
+    fn test_compression_with_algorithm() {
+        let test_struct = TestStruct {
+            field1: "Algorithm".to_string(),
+            field2: 100,
+        };
+
+        let compressed = test_struct
+            .compress_with_algorithm(CompressionAlgorithm::Snappy)
+            .unwrap();
+        let decompressed: TestStruct =
+            TCompressible::decompress_with_algorithm(&compressed, CompressionAlgorithm::Snappy)
+                .unwrap();
 
         assert_eq!(test_struct, decompressed);
     }
